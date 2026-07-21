@@ -1,76 +1,77 @@
 ---
 name: vulnerability-analyzer
-description: Analyze Sonatype vulnerability findings against the current project and produce a triage report (violation explanation, impact/reachability analysis, disposition recommendation, and mitigation path when no fix exists). Uses an incremental local cache to avoid re-reading source code or re-analyzing unchanged findings across repeated runs. Use when the user provides a Sonatype vulnerability list (CVE/reference + package + version) and asks for triage, analysis, waiver justification, or a remediation report.
+description: Analyze Sonatype vulnerability findings against the current project's actual source code (never lockfile presence alone) and produce a triage report — violation explanation, prod-reachability analysis with file:line evidence, disposition (fix/waiver/accept-risk/must-fix-alternative), and a concrete code diff for the fix. Uses an incremental local cache to avoid re-reading source or re-analyzing unchanged findings across repeated runs. Use when the user provides a Sonatype vulnerability list (CVE/reference + package + version) and asks for triage, waiver justification, remediation code changes, or a report.
 ---
 
-# Vulnerability Analysis & Triage Skill (Incremental, Cache-Backed)
+# Vulnerability Analysis & Triage Skill (Incremental, Source-Verified, Remediation-Generating)
 
 ## Purpose
 
 Given a list of vulnerabilities from Sonatype (package + version + CVE/reference number), produce
-a per-finding triage report that answers, for each item:
+a per-finding triage report that:
 
-1. **What is the violation** — plain-language explanation of the CVE/CWE and why it's flagged.
-2. **Is this project actually impacted** — is the vulnerable component reachable/used in a way
-   that matters, or just present in the tree unused.
-3. **Disposition** — one of:
-   - `FIX_REQUIRED` — patch available, apply it (direct bump or forced transitive override).
-   - `WAIVER_FALSE_POSITIVE` — vulnerable code path is not reachable/exercised in this project.
-   - `WAIVER_NOT_APPLICABLE` — vulnerability requires a precondition this project doesn't meet
-     (wrong runtime context, feature not used, server-only issue in a client-only usage, etc).
-   - `ACCEPT_RISK_TEMPORARY` — real exposure exists, no fix yet, risk is acceptable short-term
-     with compensating controls; requires a re-review date.
-   - `MUST_FIX_NO_PATCH` — no fixed version exists AND risk cannot be reasonably accepted;
-     requires an alternative mitigation (replace library, isolate feature, disable code path,
-     network-level control) rather than a version bump.
-4. **If unfixable** — explicitly state whether it's a hard "must fix via other means" or a
-   "safe to accept and monitor," with reasoning, not just "no fix available."
+1. Explains the violation in plain language.
+2. Determines whether the vulnerable component is actually used in source — and specifically
+   whether that usage is in a **production** code path, not just present in a lockfile or used
+   only in tests/build tooling.
+3. Assigns a disposition: `FIX_REQUIRED`, `WAIVER_FALSE_POSITIVE`, `WAIVER_NOT_APPLICABLE`,
+   `ACCEPT_RISK_TEMPORARY`, or `MUST_FIX_NO_PATCH` (see definitions below).
+4. Produces an actual **code diff or concrete change** for the fix — not just a target version
+   number — using the real file/syntax found in this repo.
+5. Does all of the above incrementally: unchanged findings from a prior run are reused from
+   cache with zero re-analysis and zero source re-reads.
 
-This skill MUST use the local cache described below. It must NOT re-read the full codebase on
-every run — only the minimal set of files needed to answer reachability for **new or changed**
-findings since the last run.
+> **Anti-pattern to avoid**: concluding a finding is a "match" or drawing any disposition purely
+> because the package/version appears in `package-lock.json`, `pom.xml`'s resolved tree,
+> `poetry.lock`, `requirements.txt`, etc. That only confirms Sonatype's scan is right about what's
+> *installed* — it adds zero triage value alone. Every disposition must be backed by an actual
+> source-code search result (`file:line`, or an explicit "no usage found anywhere in source"),
+> and every "yes it's used" verdict must state whether that usage is in a production code path.
+
+## Bundled reference files (load on demand, not upfront)
+
+- `references/language-patterns.md` — per-ecosystem search commands, and how to tell prod vs
+  test/build-only source for each. Load when doing Step 3 below.
+- `references/remediation-patterns.md` — concrete diff templates for direct bumps, transitive
+  overrides, and no-fix mitigations (wrapper/sanitize, feature-disable, replace library, vendor
+  patch, network control). Load when doing Step 5 below.
+- `references/report-format.md` — the finding-card template and summary rules. Load when
+  assembling the final report.
+
+Keep these out of context until the relevant step — this file stays the workflow driver; the
+reference files carry the bulk detail so re-runs don't reload everything.
+
+---
+
+## Disposition definitions
+
+- `FIX_REQUIRED` — patch available, apply it (direct bump or forced transitive override).
+- `WAIVER_FALSE_POSITIVE` — no usage of the vulnerable API found anywhere in source at all.
+- `WAIVER_NOT_APPLICABLE` — used, but only in test/build-only code excluded from the shipped
+  artifact, OR the exploit precondition doesn't hold in this deployment.
+- `ACCEPT_RISK_TEMPORARY` — prod-reachable, no fix yet, risk is acceptable short-term with
+  compensating controls; mandatory `reviewBy` date.
+- `MUST_FIX_NO_PATCH` — prod-reachable, no fixed version exists, and risk cannot be reasonably
+  accepted; requires an alternative mitigation (see remediation-patterns.md §3), not a version
+  bump.
 
 ---
 
 ## 1. Inputs
 
-### 1.1 Vulnerability list (required, provided by the user each run)
+### 1.1 Vulnerability list (provided by the user each run)
+CSV, JSON, or pasted table with at minimum: `package_ecosystem`, `package_name`,
+`current_version`, `reference` (CVE/GHSA/Sonatype ID). Optional: `severity`, `cvss`,
+`dependency_path`.
 
-Accepts CSV, JSON, or pasted table. Minimum required columns/fields:
-
-```
-package_ecosystem   e.g. npm, maven, pypi
-package_name        e.g. ws, org.springframework:spring-core
-current_version     e.g. 7.5.10
-reference           CVE/GHSA/Sonatype ID, e.g. CVE-2026-48779
-```
-
-Optional fields if available from Sonatype: `severity`, `cvss`, `dependency_path` (direct vs
-transitive chain), `sonatype_threat_category`.
-
-### 1.2 Local cache file (auto-managed by this skill)
-
-Path: `.copilot/vuln-cache.json` at the project root. Create it if missing. This is the
-mechanism that makes repeated runs cheap.
+### 1.2 Local cache — `.copilot/vuln-cache.json` (auto-managed, create if missing)
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "lastUpdated": "2026-07-21T00:00:00Z",
-  "projectFingerprint": {
-    "manifestHashes": {
-      "package.json": "sha256:...",
-      "package-lock.json": "sha256:...",
-      "pom.xml": "sha256:..."
-    }
-  },
   "dependencyGraph": {
-    "npm": {
-      "ws": { "version": "7.5.10", "isDirect": false, "parents": ["some-lib"] }
-    },
-    "maven": {
-      "org.springframework:spring-core": { "version": "5.3.20", "isDirect": true, "parents": [] }
-    }
+    "npm": { "ws": { "version": "7.5.10", "isDirect": false, "parents": ["some-lib"] } }
   },
   "findings": {
     "CVE-2026-48779|npm|ws|7.5.10": {
@@ -81,13 +82,18 @@ mechanism that makes repeated runs cheap.
       "analyzedVersion": "7.5.10",
       "isDirect": false,
       "reachable": true,
-      "reachabilityEvidence": ["src/gateway/wsServer.ts:42 — new WebSocketServer(...)"],
+      "prodReachable": true,
+      "reachabilityEvidence": [
+        "src/gateway/wsServer.ts:42 — new WebSocketServer(...) — prod source, ships in Docker image"
+      ],
       "disposition": "FIX_REQUIRED",
       "fixedVersion": "7.5.11",
+      "suggestedDiff": "package.json: \"ws\": \"7.5.10\" -> \"7.5.11\"",
       "isBreakingChange": false,
       "effort": "LOW",
-      "justification": "Direct WebSocket server usage found; patch is a clean patch-version bump.",
+      "justification": "Direct WebSocket server usage confirmed at wsServer.ts:42; clean patch bump.",
       "reviewBy": null,
+      "verifiedByJudgePass": true,
       "analyzedAt": "2026-07-21T00:00:00Z",
       "codeFilesChecked": ["src/gateway/wsServer.ts"],
       "codeFilesHash": "sha256:..."
@@ -96,125 +102,76 @@ mechanism that makes repeated runs cheap.
 }
 ```
 
-Key design points:
-- The cache key is `reference|ecosystem|package|version` — if the *version* changes (e.g. after
-  a Renovate PR merges), the old entry is stale and must be re-analyzed; don't silently reuse it.
-- `codeFilesChecked` + `codeFilesHash` let the skill detect if the specific files it relied on for
-  a reachability verdict have since changed, without hashing the whole repo.
-- `reviewBy` is mandatory whenever `disposition` is `ACCEPT_RISK_TEMPORARY` or any `WAIVER_*`.
+Cache key: `reference|ecosystem|package|version`. If the version changes, the entry is stale and
+must be re-analyzed. `codeFilesChecked`/`codeFilesHash` let re-runs detect drift in just the files
+that mattered for a given finding, without hashing the whole repo.
 
 ---
 
-## 2. Workflow (run this every time, in order)
+## 2. Workflow
 
 ### Step 1 — Load or initialize cache
-Read `.copilot/vuln-cache.json`. If it doesn't exist, create it empty (do not treat that as an
-error, just start a fresh analysis for everything in the input list).
+Read `.copilot/vuln-cache.json`; create empty if missing.
 
-### Step 2 — Diff the input list against the cache
-For every row in the new vulnerability list, compute the cache key
-(`reference|ecosystem|package|current_version`) and classify it as:
+### Step 2 — Diff input list against cache
+Classify each row as **UNCHANGED** (reuse verbatim, no re-analysis, no source re-reads),
+**NEW**, **VERSION_CHANGED**, or **STALE_CODE** (checked file hash changed — re-verify
+reachability only, the CVE explanation doesn't need re-deriving). Entries removed from the input
+list are marked `OUT_OF_SCOPE` in cache, not deleted, and excluded from the current report.
 
-- **UNCHANGED** — key exists in cache with `status: ANALYZED`, and the version matches, and
-  none of `codeFilesChecked` have changed (check mtime/hash cheaply, don't re-read content unless
-  changed) → reuse the cached analysis verbatim. **Do not re-read source or re-reason about it.**
-- **NEW** — key not in cache at all → full analysis (Step 3).
-- **VERSION_CHANGED** — same reference+package, different version than what's cached → treat as
-  a fresh analysis (patch may already be applied, or the situation may have changed).
-- **STALE_CODE** — cached but a checked file's hash changed since last analysis → re-verify
-  reachability only (skip re-deriving the CVE explanation, which doesn't change).
+### Step 3 — Reachability analysis (NEW / VERSION_CHANGED / STALE_CODE only)
+Load `references/language-patterns.md` for the relevant ecosystem(s). For each finding:
+1. Identify the vulnerable surface from the advisory (specific function/class/config option).
+2. Run the targeted search commands from the reference file — scoped to that package/API only.
+3. Classify every match as production source or test/build-only, per the reference file's rules
+   for that ecosystem.
+4. Record two distinct booleans: `reachable` (used anywhere, including tests) and
+   `prodReachable` (used in code that ships). Cite `file:line` for every "yes."
+5. Build each ecosystem's dependency tree **once per run** (not once per finding) and reuse it.
 
-Any cache entries whose key is **no longer present** in the current input list should be left in
-the cache (don't delete — they're historical record) but excluded from the current report unless
-the user asks for a full history view. If the user explicitly says a package/reference was
-removed from scope, mark it `status: "OUT_OF_SCOPE"` rather than deleting the entry.
+### Step 4 — Verification pass ("judge" step, reduces false positives/negatives)
+Before finalizing a disposition, re-check your own conclusion against the evidence:
+- Does the cited `file:line` actually construct/call the vulnerable surface, or just reference an
+  unrelated export from the same package? If the latter, this is not evidence of reachability —
+  say so and keep searching or mark not-found.
+- If claiming "test-only, excluded from prod," did you actually check the build/packaging config
+  (Dockerfile final stage, `pom.xml` scope + shade/assembly plugin, `poetry install --only main`
+  flag in CI), or did you assume from directory naming alone? If you didn't check, say so
+  explicitly rather than asserting it as fact.
+- If claiming "no fixed version exists," did you check the actual advisory/registry for a version
+  newer than what you assumed, not just the version in the Sonatype export?
+Set `verifiedByJudgePass: true` only after this check; if you can't verify a claim, state the
+uncertainty in the report instead of forcing a confident answer.
 
-### Step 3 — Analyze NEW / VERSION_CHANGED / STALE_CODE items only
+### Step 5 — Generate concrete remediation
+Load `references/remediation-patterns.md`. For every `FIX_REQUIRED` or `MUST_FIX_NO_PATCH`
+finding, produce an actual diff/snippet using the real file path, current version, and syntax
+found in Step 3 — not a generic example. Include what to re-test and the breaking-change risk.
+Store this in `suggestedDiff` in the cache so re-runs don't have to regenerate it unless the
+finding is re-analyzed.
 
-For each:
-
-1. **Explain the violation** — describe the CWE/CVE mechanism in plain language (what an
-   attacker does, what class of weakness it is). Don't just restate the Sonatype description;
-   explain *why* it matters.
-2. **Determine direct vs transitive** and the dependency chain (use the cached
-   `dependencyGraph` if already built this run; only regenerate the dependency tree once per run
-   even if multiple findings need it — e.g. run `npm ls`, `mvn dependency:tree`,
-   `pip show`/`pipdeptree` a single time and reuse the output for every finding in that
-   ecosystem).
-3. **Reachability check** (the expensive step — keep it targeted):
-   - Identify the specific vulnerable function/API/code path from the CVE advisory.
-   - Search the codebase **only** for usage of that specific package/API (grep/ripgrep for
-     import statements and the relevant call sites) — do not open unrelated files, and do not
-     read entire directories "just in case."
-   - Record the exact file(s)/line(s) found as `reachabilityEvidence`, or explicitly record "no
-     usage found" if the package is present only as an unused transitive dependency.
-4. **Check fix availability**:
-   - Is there a fixed version? If yes → `FIX_REQUIRED` (or if already unreachable, still note the
-     fix exists but disposition follows reachability, see below).
-   - If no fixed version exists, determine:
-     - Is the vulnerable path reachable/used? If yes → `MUST_FIX_NO_PATCH`: recommend a concrete
-       alternative (replace the library, vendor a patched fork, wrap/sanitize the call site,
-       disable the affected feature, add a network/WAF control) — never just say "no fix, risk
-       accepted" when the code path is genuinely exercised.
-     - If no → `ACCEPT_RISK_TEMPORARY` or `WAIVER_NOT_APPLICABLE`, with a mandatory `reviewBy`
-       date (default: 90 days out unless the user specifies a cadence).
-5. **Assign disposition** using this priority order:
-   - Not reachable/used at all → `WAIVER_FALSE_POSITIVE`
-   - Reachable, but precondition for exploit doesn't hold in this deployment context (e.g.
-     requires a config flag you don't enable) → `WAIVER_NOT_APPLICABLE`
-   - Reachable, fix exists → `FIX_REQUIRED`
-   - Reachable, no fix, real exposure, no compensating control feasible right now →
-     `ACCEPT_RISK_TEMPORARY` (must include compensating controls + review date)
-   - Reachable, no fix, exposure is significant/exploitable and no acceptable temporary control →
-     `MUST_FIX_NO_PATCH` with alternative mitigation
-6. **Estimate effort**: 🟢 Low (version bump only) / 🟡 Medium (override + retest) / 🔴 High
-   (requires code change, library replacement, or architecture change).
-7. Write the result into `findings[key]` in the cache, including `codeFilesChecked` and their
-   current hash, so future runs can detect drift.
-
-### Step 4 — Assemble the report
-Combine cached (unchanged) results with newly analyzed results into one report covering the
-**current input list only**. Save the updated cache file.
+### Step 6 — Assemble report and save cache
+Load `references/report-format.md`. Combine cached + newly analyzed results into one report
+covering the current input list. Save the updated cache.
 
 ---
 
-## 3. Report format
+## 3. Token-saving rules (non-negotiable)
 
-Produce a markdown table plus a short narrative per non-trivial item. Table columns:
+- Never re-read the entire source tree; use targeted search scoped to the specific package/API.
+- Build each ecosystem's dependency tree once per run, not once per finding.
+- `UNCHANGED` items are copied from cache with zero re-analysis, zero file reads, zero
+  regeneration of the diff.
+- `STALE_CODE` items only get reachability + remediation re-verified, not the CVE explanation.
+- Adding/removing items from the list only triggers processing of the delta.
+- Load the three reference files only when their corresponding step is reached, not all at once
+  at the start of a run.
 
-| Reference | Package | Version | Direct/Transitive | Reachable? | Disposition | Fixed Version | Effort | Review By |
-|---|---|---|---|---|---|---|---|---|
+## 4. Handling repeated runs with a changing list
 
-Below the table, for every item that is `MUST_FIX_NO_PATCH`, `ACCEPT_RISK_TEMPORARY`, or any
-`WAIVER_*`, include a short paragraph: violation explanation, reachability evidence (file:line or
-"not found"), and justification for the disposition. Items that are straightforward
-`FIX_REQUIRED` with a clean patch-version bump can stay as a one-line table row without a
-paragraph — don't pad the report with narrative for the easy cases.
-
-End the report with a summary count by disposition, and a separate list of items whose
-`reviewBy` date has already passed (these need immediate re-triage, not silent carry-forward).
-
----
-
-## 4. Token-saving rules (non-negotiable)
-
-- Never re-read the entire source tree. Use targeted search (grep/ripgrep) scoped to the
-  package/API in question.
-- Build each ecosystem's dependency tree **once per run**, not once per finding.
-- For `UNCHANGED` items, copy the cached analysis into the report without re-invoking any
-  reasoning or file reads.
-- Only re-verify reachability (not the full CVE explanation) for `STALE_CODE` items — the CVE
-  mechanism doesn't change; only whether your code still touches it might.
-- When the user says "add package X / reference Y" or "remove package X," only process the
-  delta — do not re-run Step 3 for anything already `ANALYZED` and unaffected by the change.
-
-## 5. Handling repeated runs with a changing list
-
-- **Adding items**: only new keys go through Step 3; everything else is reused from cache.
-- **Removing items**: mark as `OUT_OF_SCOPE` in cache, exclude from the current report, keep the
-  historical entry.
-- **Re-running after a Renovate/patch merge**: the version in the new Sonatype export will differ
-  from what's cached → treated as `VERSION_CHANGED` → re-analyzed (this is intentional, since the
-  fix may have already landed and the finding may simply disappear from Sonatype's next scan).
-- **Forcing a full re-analysis** of an item despite an unchanged cache: user can say
-  "force-refresh CVE-XXXX" — only then re-derive everything for that one key.
+- **Adding items**: only new keys go through Steps 3–5.
+- **Removing items**: mark `OUT_OF_SCOPE`, exclude from report, keep historical record.
+- **Re-running after a Renovate/patch merge**: version differs from cache → `VERSION_CHANGED` →
+  re-analyzed (the finding may simply disappear from Sonatype's next scan if already fixed).
+- **Force a full re-analysis** of one item regardless of cache state: user says
+  "force-refresh CVE-XXXX."
