@@ -37,6 +37,9 @@ a per-finding triage report that:
   patch, network control). Load when doing Step 5 below.
 - `references/report-format.md` — the finding-card template and summary rules. Load when
   assembling the final report.
+- `references/sample-walkthrough.md` — a full worked example (input → reachability check →
+  judge pass → remediation diff → report → cache state → incremental re-run). Reference this if
+  unsure what "correct" output should look like, or if the user asks to see an example run.
 
 Keep these out of context until the relevant step — this file stays the workflow driver; the
 reference files carry the bulk detail so re-runs don't reload everything.
