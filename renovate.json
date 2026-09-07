@@ -1,0 +1,91 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "dependencyDashboard": true,
+  "rangeStrategy": "replace",
+  "separateMinorPatch": true,
+  "minimumReleaseAge": "3 days",
+  "postUpdateOptions": ["npmDedupe"],
+  "prConcurrentLimit": 10,
+  "prHourlyLimit": 4,
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 6am on monday"]
+  },
+  "osvVulnerabilityAlerts": true,
+  "vulnerabilityAlerts": {
+    "labels": ["security", "priority"],
+    "minimumReleaseAge": null
+  },
+  "packageRules": [
+    {
+      "groupName": "react-core",
+      "matchPackageNames": ["react", "react-dom", "react-is", "react-refresh"]
+    },
+    {
+      "groupName": "react-router",
+      "matchPackageNames": ["react-router", "react-router-dom"]
+    },
+    {
+      "groupName": "mui-emotion",
+      "matchPackageNames": ["@mui/**", "@emotion/react", "@emotion/styled"]
+    },
+    {
+      "groupName": "babel",
+      "matchPackageNames": ["@babel/**", "babel-loader"]
+    },
+    {
+      "groupName": "jest-testing-library",
+      "matchPackageNames": [
+        "jest", "jest-resolve", "jest-watch-typeahead", "babel-jest",
+        "identity-obj-proxy", "fetch-mock", "@testing-library/**"
+      ]
+    },
+    {
+      "groupName": "webpack-build",
+      "matchPackageNames": [
+        "webpack", "webpack-dev-server", "webpack-manifest-plugin",
+        "html-webpack-plugin", "terser-webpack-plugin", "mini-css-extract-plugin",
+        "css-minimizer-webpack-plugin", "case-sensitive-paths-webpack-plugin",
+        "workbox-webpack-plugin", "@pmmmwh/react-refresh-webpack-plugin",
+        "@svgr/webpack", "css-loader", "sass-loader", "sass", "style-loader",
+        "source-map-loader", "file-loader", "resolve-url-loader"
+      ]
+    },
+    {
+      "groupName": "postcss",
+      "matchPackageNames": [
+        "postcss", "postcss-flexbugs-fixes", "postcss-loader",
+        "postcss-normalize", "postcss-preset-env"
+      ]
+    },
+    {
+      "groupName": "eslint",
+      "matchPackageNames": ["eslint", "eslint-webpack-plugin", "eslint-plugin-jest", "@typescript-eslint/**"]
+    },
+    {
+      "groupName": "tailwind",
+      "matchPackageNames": ["tailwindcss", "@tailwindcss/**"]
+    },
+    {
+      "description": "Safe tier: patch / pin / digest automerge per family after CI passes",
+      "matchUpdateTypes": ["patch", "pin", "digest"],
+      "automerge": true,
+      "platformAutomerge": true
+    },
+    {
+      "description": "All majors are gated behind the dashboard — riskiest, break the build",
+      "matchUpdateTypes": ["major"],
+      "dependencyDashboardApproval": true,
+      "addLabels": ["major-review"]
+    },
+    {
+      "description": "Frozen CRA / react-scripts internals — no maintained upstream, they pin the toolchain",
+      "enabled": false,
+      "matchPackageNames": [
+        "babel-preset-react-app", "babel-plugin-named-asset-import",
+        "eslint-config-react-app", "react-dev-utils",
+        "react-app-polyfill", "react-error-overlay"
+      ]
+    }
+  ]
+}
